@@ -1,6 +1,6 @@
 // js/firebase-room.js
-// Firebase Room / Lobby module
-// Requires Firebase Compat SDK + window.FirebaseAuth
+// Firebase Room / Lobby module - Complete implementation
+// Supports 2/3/4 player rooms with waiting lobby flow
 
 (function () {
   'use strict';
@@ -42,7 +42,9 @@
 
       onRoomChanged: () => () => {},
 
-      onPlayersChanged: () => () => {}
+      onPlayersChanged: () => () => {},
+
+      startRoom: async () => ({ success: false, error: 'AUTH_REQUIRED' })
     };
 
     return;
@@ -100,6 +102,10 @@
       .substring(0, 50);
   }
 
+  function validMaxPlayers(maxPlayers) {
+    return [2, 3, 4].includes(maxPlayers);
+  }
+
   // --------------------------------------------------
   // Authentication
   // --------------------------------------------------
@@ -149,7 +155,7 @@
   // CREATE ROOM
   // --------------------------------------------------
 
-  async function createRoom(roomCodeRaw, playerName) {
+  async function createRoom(roomCodeRaw, playerName, maxPlayers) {
     try {
       console.log('[FirebaseRoom] Creating room...');
 
@@ -177,6 +183,13 @@
         return {
           success: false,
           error: 'INVALID_NAME'
+        };
+      }
+
+      if (!validMaxPlayers(maxPlayers)) {
+        return {
+          success: false,
+          error: 'INVALID_MAX_PLAYERS'
         };
       }
 
@@ -211,7 +224,7 @@
 
               createdAt: ServerValue.TIMESTAMP,
 
-              maxPlayers: 4,
+              maxPlayers: maxPlayers,
 
               players: {
                 [uid]: {
@@ -271,7 +284,9 @@
 
       console.log(
         '[FirebaseRoom] Room created:',
-        roomCode
+        roomCode,
+        'MaxPlayers:',
+        maxPlayers
       );
 
       return {
@@ -359,6 +374,14 @@
         return {
           success: false,
           error: 'ROOM_NOT_FOUND'
+        };
+      }
+
+      // Check room status
+      if (room.status === 'started') {
+        return {
+          success: false,
+          error: 'GAME_ALREADY_STARTED'
         };
       }
 
@@ -578,7 +601,7 @@
               player.uid !== uid;
           });
 
-        // No players left
+        // No players left - remove room
         if (remaining.length === 0) {
           await roomRef.remove();
 
@@ -867,6 +890,83 @@
   }
 
   // --------------------------------------------------
+  // ROOM START (HOST ONLY)
+  // --------------------------------------------------
+
+  async function startRoom(roomCodeRaw) {
+    try {
+      const user = await ensureAuth();
+
+      const uid = user.uid;
+
+      const roomCode = normalizeCode(roomCodeRaw);
+
+      if (!validRoomCode(roomCode)) {
+        return {
+          success: false,
+          error: 'INVALID_ROOM_CODE'
+        };
+      }
+
+      const roomRef = db.ref('rooms/' + roomCode);
+
+      const snapshot = await roomRef.once('value');
+
+      const room = snapshot.val();
+
+      if (!room) {
+        return {
+          success: false,
+          error: 'ROOM_NOT_FOUND'
+        };
+      }
+
+      // Only host can start
+      if (room.hostId !== uid) {
+        return {
+          success: false,
+          error: 'NOT_HOST'
+        };
+      }
+
+      // Verify player count matches maxPlayers
+      const players = Object.keys(room.players || {});
+
+      if (players.length !== room.maxPlayers) {
+        return {
+          success: false,
+          error: 'INVALID_PLAYER_COUNT'
+        };
+      }
+
+      // Set room status to started
+      await roomRef.child('status').set('started');
+
+      console.log('[FirebaseRoom] Room started:', roomCode);
+
+      return {
+        success: true
+      };
+
+    } catch (err) {
+      console.error('[FirebaseRoom] startRoom error:', err);
+
+      if (err && err.message === 'AUTH_REQUIRED') {
+        return {
+          success: false,
+          error: 'AUTH_REQUIRED'
+        };
+      }
+
+      return {
+        success: false,
+        error: 'UNKNOWN_ERROR',
+        details: err ? err.message : 'Unknown error'
+      };
+    }
+  }
+
+  // --------------------------------------------------
   // PUBLIC API
   // --------------------------------------------------
 
@@ -884,7 +984,9 @@
     isHost: isHost,
 
     onRoomChanged: onRoomChanged,
-    onPlayersChanged: onPlayersChanged
+    onPlayersChanged: onPlayersChanged,
+
+    startRoom: startRoom
   };
 
   console.log(
